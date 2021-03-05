@@ -40,7 +40,8 @@
 #include <linux/cn_proc.h>
 #include <linux/compiler.h>
 #include <linux/posix-timers.h>
-
+#include <linux/oom.h>
+#include <linux/capability.h>
 #define CREATE_TRACE_POINTS
 #include <trace/events/signal.h>
 
@@ -1213,7 +1214,6 @@ int do_send_sig_info(int sig, struct siginfo *info, struct task_struct *p,
 {
 	unsigned long flags;
 	int ret = -ESRCH;
-
 	if (lock_task_sighand(p, &flags)) {
 		ret = send_signal(sig, info, p, group);
 		unlock_task_sighand(p, &flags);

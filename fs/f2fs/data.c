@@ -2,6 +2,7 @@
  * fs/f2fs/data.c
  *
  * Copyright (c) 2012 Samsung Electronics Co., Ltd.
+ * Copyright (C) 2021 XiaoMi, Inc.
  *             http://www.samsung.com/
  *
  * This program is free software; you can redistribute it and/or modify
@@ -432,9 +433,200 @@ next:
 
 	inc_page_count(sbi, WB_DATA_TYPE(bio_page));
 
-	if (io->bio && (io->last_block_in_bio != fio->new_blkaddr - 1 ||
-	    (io->fio.op != fio->op || io->fio.op_flags != fio->op_flags) ||
-			!__same_bdev(sbi, fio->new_blkaddr, io->bio)))
+static void del_bio_entry(struct bio_entry *be)
+{
+	list_del(&be->list);
+	kmem_cache_free(bio_entry_slab, be);
+}
+
+static int add_ipu_page(struct f2fs_io_info *fio, struct bio **bio,
+							struct page *page)
+{
+	struct f2fs_sb_info *sbi = fio->sbi;
+	enum temp_type temp;
+	bool found = false;
+	int ret = -EAGAIN;
+
+	for (temp = HOT; temp < NR_TEMP_TYPE && !found; temp++) {
+		struct f2fs_bio_info *io = sbi->write_io[DATA] + temp;
+		struct list_head *head = &io->bio_list;
+		struct bio_entry *be;
+
+		down_write(&io->bio_list_lock);
+		list_for_each_entry(be, head, list) {
+			if (be->bio != *bio)
+				continue;
+
+			found = true;
+
+			f2fs_bug_on(sbi, !page_is_mergeable(sbi, *bio,
+							    *fio->last_block,
+							    fio->new_blkaddr));
+			if (f2fs_crypt_mergeable_bio(*bio,
+					fio->page->mapping->host,
+					fio->page->index, fio) &&
+			    bio_add_page(*bio, page, PAGE_SIZE, 0) ==
+					PAGE_SIZE) {
+				ret = 0;
+				break;
+			}
+
+			/* page can't be merged into bio; submit the bio */
+			del_bio_entry(be);
+			__submit_bio(sbi, *bio, DATA);
+			break;
+		}
+		up_write(&io->bio_list_lock);
+	}
+
+	if (ret) {
+		bio_put(*bio);
+		*bio = NULL;
+	}
+
+	return ret;
+}
+
+void f2fs_submit_merged_ipu_write(struct f2fs_sb_info *sbi,
+					struct bio **bio, struct page *page)
+{
+	enum temp_type temp;
+	bool found = false;
+	struct bio *target = bio ? *bio : NULL;
+
+	for (temp = HOT; temp < NR_TEMP_TYPE && !found; temp++) {
+		struct f2fs_bio_info *io = sbi->write_io[DATA] + temp;
+		struct list_head *head = &io->bio_list;
+		struct bio_entry *be;
+
+		if (list_empty(head))
+			continue;
+
+		down_read(&io->bio_list_lock);
+		list_for_each_entry(be, head, list) {
+			if (target)
+				found = (target == be->bio);
+			else
+				found = __has_merged_page(be->bio, NULL,
+								page, 0);
+			if (found)
+				break;
+		}
+		up_read(&io->bio_list_lock);
+
+		if (!found)
+			continue;
+
+		found = false;
+
+		down_write(&io->bio_list_lock);
+		list_for_each_entry(be, head, list) {
+			if (target)
+				found = (target == be->bio);
+			else
+				found = __has_merged_page(be->bio, NULL,
+								page, 0);
+			if (found) {
+				target = be->bio;
+				del_bio_entry(be);
+				break;
+			}
+		}
+		up_write(&io->bio_list_lock);
+	}
+
+	if (found)
+		__submit_bio(sbi, target, DATA);
+	if (bio && *bio) {
+		bio_put(*bio);
+		*bio = NULL;
+	}
+}
+
+int f2fs_merge_page_bio(struct f2fs_io_info *fio)
+{
+	struct bio *bio = *fio->bio;
+	struct page *page = fio->encrypted_page ?
+			fio->encrypted_page : fio->page;
+
+	if (!f2fs_is_valid_blkaddr(fio->sbi, fio->new_blkaddr,
+			__is_meta_io(fio) ? META_GENERIC : DATA_GENERIC))
+		return -EFSCORRUPTED;
+
+	trace_f2fs_submit_page_bio(page, fio);
+	f2fs_trace_ios(fio, 0);
+
+	if (bio && !page_is_mergeable(fio->sbi, bio, *fio->last_block,
+				       fio->new_blkaddr))
+		f2fs_submit_merged_ipu_write(fio->sbi, &bio, NULL);
+
+alloc_new:
+	if (!bio) {
+		bio = __bio_alloc(fio, BIO_MAX_PAGES);
+		f2fs_set_bio_crypt_ctx(bio, fio->page->mapping->host,
+				       fio->page->index, fio,
+				       GFP_NOIO);
+		bio_set_op_attrs(bio, fio->op, fio->op_flags);
+
+		add_bio_entry(fio->sbi, bio, page, fio->temp);
+	} else {
+		if (add_ipu_page(fio, &bio, page))
+			goto alloc_new;
+	}
+
+	if (fio->io_wbc)
+		wbc_account_io(fio->io_wbc, page, PAGE_SIZE);
+
+	inc_page_count(fio->sbi, WB_DATA_TYPE(page));
+
+	*fio->last_block = fio->new_blkaddr;
+	*fio->bio = bio;
+
+	return 0;
+}
+
+void f2fs_submit_page_write(struct f2fs_io_info *fio)
+{
+	struct f2fs_sb_info *sbi = fio->sbi;
+	enum page_type btype = PAGE_TYPE_OF_BIO(fio->type);
+	struct f2fs_bio_info *io = sbi->write_io[btype] + fio->temp;
+	struct page *bio_page;
+
+	f2fs_bug_on(sbi, is_read_io(fio->op));
+
+	down_write(&io->io_rwsem);
+next:
+	if (fio->in_list) {
+		spin_lock(&io->io_lock);
+		if (list_empty(&io->io_list)) {
+			spin_unlock(&io->io_lock);
+			goto out;
+		}
+		fio = list_first_entry(&io->io_list,
+						struct f2fs_io_info, list);
+		list_del(&fio->list);
+		spin_unlock(&io->io_lock);
+	}
+
+	verify_fio_blkaddr(fio);
+
+	if (fio->encrypted_page)
+		bio_page = fio->encrypted_page;
+	else if (fio->compressed_page)
+		bio_page = fio->compressed_page;
+	else
+		bio_page = fio->page;
+
+	/* set submitted = true as a return value */
+	fio->submitted = true;
+
+	inc_page_count(sbi, WB_DATA_TYPE(bio_page));
+
+	if (io->bio &&
+	    (!io_is_mergeable(sbi, io->bio, io, fio, io->last_block_in_bio,
+			      fio->new_blkaddr) ||
+	     !f2fs_crypt_mergeable_bio(io->bio, fio->page->mapping->host,
+				       fio->page->index, fio)))
 		__submit_merged_bio(io);
 alloc_new:
 	if (io->bio == NULL) {

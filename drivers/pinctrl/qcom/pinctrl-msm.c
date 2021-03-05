@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2013, Sony Mobile Communications AB.
- * Copyright (c) 2013, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2021 XiaoMi, Inc.
+ * Copyright (c) 2013-2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -35,6 +36,13 @@
 #include "../pinconf.h"
 #include "pinctrl-msm.h"
 #include "../pinctrl-utils.h"
+#include <linux/wakeup_reason.h>
+#include <linux/syscore_ops.h>
+#include <soc/qcom/socinfo.h>
+#include <linux/suspend.h>
+#ifdef CONFIG_HIBERNATION
+#include <linux/notifier.h>
+#endif
 
 #define MAX_NR_GPIO 300
 #define PS_HOLD_OFFSET 0x820
@@ -225,6 +233,24 @@ static int msm_config_group_get(struct pinctrl_dev *pctldev,
 	unsigned bit;
 	int ret;
 	u32 val;
+	uint32_t hw_type = get_hw_version_platform();
+
+	if (HARDWARE_PLATFORM_DAVINCI == hw_type
+	 || HARDWARE_PLATFORM_TOCO   == hw_type
+	 || HARDWARE_PLATFORM_SWEET  == hw_type
+	 || HARDWARE_PLATFORM_TUCANA == hw_type) {
+		/* gpio 0~3 is FP spi, gpio 59~62 is NFC spi */
+		if (group < 4 || (group > 58 && group < 63))
+			return 0;
+	} else if (HARDWARE_PLATFORM_PHOENIX == hw_type) {
+		/* gpio 0~3 is NFC spi, gpio 59~62 is FP spi */
+		if (group < 4 || (group > 58 && group < 63))
+			return 0;
+	} else {
+		/* gpio 0~3 is FP spi, gpio 6~9 is NFC spi */
+		if (group < 4 || (group > 5 && group < 10))
+			return 0;
+	}
 
 	g = &pctrl->soc->groups[group];
 
@@ -505,7 +531,7 @@ static void msm_gpio_dbg_show_one(struct seq_file *s,
 	int is_out;
 	int drive;
 	int pull;
-	u32 ctl_reg;
+	u32 ctl_reg, io_reg, value;
 
 	static const char * const pulls[] = {
 		"no pull",
@@ -522,17 +548,40 @@ static void msm_gpio_dbg_show_one(struct seq_file *s,
 	drive = (ctl_reg >> g->drv_bit) & 7;
 	pull = (ctl_reg >> g->pull_bit) & 3;
 
+	io_reg = readl(pctrl->regs + g->io_reg);
+	value = (is_out ? io_reg >> g->out_bit : io_reg >> g->in_bit) & 0x1;
 	seq_printf(s, " %-8s: %-3s %d", g->name, is_out ? "out" : "in", func);
 	seq_printf(s, " %dmA", msm_regval_to_drive(drive));
 	seq_printf(s, " %s", pulls[pull]);
+	seq_printf(s, " %s", value ? "high":"low");
 }
 
 static void msm_gpio_dbg_show(struct seq_file *s, struct gpio_chip *chip)
 {
 	unsigned gpio = chip->base;
 	unsigned i;
+	uint32_t hw_type;
+
+	hw_type = get_hw_version_platform();
 
 	for (i = 0; i < chip->ngpio; i++, gpio++) {
+		if (HARDWARE_PLATFORM_DAVINCI == hw_type
+			|| HARDWARE_PLATFORM_TOCO   == hw_type
+			|| HARDWARE_PLATFORM_SWEET  == hw_type
+			|| HARDWARE_PLATFORM_TUCANA == hw_type) {
+			/* gpio 0~3 is FP spi, gpio 59~62 is NFC spi */
+			if (i < 4 || (i > 58 && i < 63))
+				continue;
+		} else if (HARDWARE_PLATFORM_PHOENIX == hw_type) {
+			/* gpio 0~3 is NFC spi, gpio 59~62 is FP spi */
+			if (i < 4 || (i > 58 && i < 63))
+				continue;
+
+		} else {
+			/* gpio 0~3 is FP spi, gpio 6~9 is NFC spi */
+			if (i < 4 || (i > 5 && i < 10))
+				continue;
+		}
 		msm_gpio_dbg_show_one(s, NULL, chip, i, gpio);
 		seq_puts(s, "\n");
 	}
@@ -910,6 +959,231 @@ static void msm_pinctrl_setup_pm_reset(struct msm_pinctrl *pctrl)
 			break;
 		}
 }
+
+#ifdef CONFIG_PM
+extern int msm_show_resume_irq_mask;
+#ifdef CONFIG_HIBERNATION
+static bool hibernation;
+
+static int pinctrl_hibernation_notifier(struct notifier_block *nb,
+					unsigned long event, void *dummy)
+{
+	struct msm_pinctrl *pctrl = msm_pinctrl_data;
+	const struct msm_pinctrl_soc_data *soc = pctrl->soc;
+	u32 spi_cfg_regs_count;
+
+	if (event == PM_HIBERNATION_PREPARE) {
+		pctrl->gpio_regs = kcalloc(soc->ngroups,
+					sizeof(*pctrl->gpio_regs), GFP_KERNEL);
+		if (pctrl->gpio_regs == NULL)
+			return -ENOMEM;
+
+		if (soc->tile_count) {
+			pctrl->msm_tile_regs = kcalloc(soc->tile_count,
+				sizeof(*pctrl->msm_tile_regs), GFP_KERNEL);
+			if (pctrl->msm_tile_regs == NULL) {
+				kfree(pctrl->gpio_regs);
+				return -ENOMEM;
+			}
+		}
+		if (pctrl->spi_cfg_regs) {
+			spi_cfg_regs_count = (pctrl->spi_cfg_end -
+					pctrl->spi_cfg_regs) / 4 + 2;
+			pctrl->spi_cfg_regs_val = kcalloc(spi_cfg_regs_count,
+				sizeof(unsigned int), GFP_KERNEL);
+			if (pctrl->spi_cfg_regs_val == NULL) {
+				kfree(pctrl->gpio_regs);
+				kfree(pctrl->msm_tile_regs);
+				return -ENOMEM;
+			}
+		}
+		hibernation = true;
+	} else if (event == PM_POST_HIBERNATION) {
+		kfree(pctrl->gpio_regs);
+		kfree(pctrl->msm_tile_regs);
+		kfree(pctrl->spi_cfg_regs_val);
+		pctrl->gpio_regs = NULL;
+		pctrl->msm_tile_regs = NULL;
+		pctrl->spi_cfg_regs_val = NULL;
+		hibernation = false;
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block pinctrl_notif_block = {
+	.notifier_call = pinctrl_hibernation_notifier,
+};
+
+static int msm_pinctrl_hibernation_suspend(void)
+{
+	const struct msm_pingroup *pgroup;
+	struct msm_pinctrl *pctrl = msm_pinctrl_data;
+	const struct msm_pinctrl_soc_data *soc = pctrl->soc;
+	void __iomem *base = NULL;
+	void __iomem *tile_addr = NULL;
+	u32 i, j, spi_cfg_regs_count;
+	phys_addr_t spi_cfg_reg;
+
+	/* Save direction conn registers for hmss */
+	for (i = 0; i < soc->tile_count; i++) {
+		base = reassign_pctrl_reg(soc, i);
+		tile_addr = base + soc->dir_conn_addr[i];
+		for (j = 0; j < 8; j++)
+			pctrl->msm_tile_regs[i].dir_con_regs[j] =
+						readl_relaxed(tile_addr + j*4);
+	}
+
+	/* Save spi_cfg_regs */
+	if (pctrl->spi_cfg_regs && pctrl->spi_cfg_regs_val) {
+		spi_cfg_regs_count = (pctrl->spi_cfg_end -
+				pctrl->spi_cfg_regs) / 4 + 2;
+		spi_cfg_reg = pctrl->spi_cfg_regs;
+		for (j = 0; j < spi_cfg_regs_count; j++)
+			pctrl->spi_cfg_regs_val[j] =
+				scm_io_read(spi_cfg_reg + j * 4);
+	}
+	/* All normal gpios will have common registers, first save them */
+	for (i = 0; i < soc->ngpios; i++) {
+		pgroup = &soc->groups[i];
+		base = reassign_pctrl_reg(soc, i);
+		pctrl->gpio_regs[i].ctl_reg =
+				readl_relaxed(base + pgroup->ctl_reg);
+		pctrl->gpio_regs[i].io_reg =
+				readl_relaxed(base + pgroup->io_reg);
+		pctrl->gpio_regs[i].intr_cfg_reg =
+				readl_relaxed(base + pgroup->intr_cfg_reg);
+		pctrl->gpio_regs[i].intr_status_reg =
+				readl_relaxed(base + pgroup->intr_status_reg);
+	}
+
+	/* Save other special gpios. Variable i in fallthrough */
+	for ( ; i < soc->ngroups; i++) {
+		pgroup = &soc->groups[i];
+		base = reassign_pctrl_reg(soc, i);
+		if (pgroup->ctl_reg)
+			pctrl->gpio_regs[i].ctl_reg =
+				readl_relaxed(base + pgroup->ctl_reg);
+		if (pgroup->io_reg)
+			pctrl->gpio_regs[i].io_reg =
+				readl_relaxed(base + pgroup->io_reg);
+	}
+	return 0;
+}
+
+static void msm_pinctrl_hibernation_resume(void)
+{
+	u32 i, j;
+	const struct msm_pingroup *pgroup;
+	struct msm_pinctrl *pctrl = msm_pinctrl_data;
+	const struct msm_pinctrl_soc_data *soc = pctrl->soc;
+	void __iomem *base = NULL;
+	void __iomem *tile_addr = NULL;
+	u32 spi_cfg_regs_count;
+	phys_addr_t spi_cfg_reg;
+
+	if (!pctrl->gpio_regs || !pctrl->msm_tile_regs)
+		return;
+
+	for (i = 0; i < soc->tile_count; i++) {
+		base = reassign_pctrl_reg(soc, i);
+		tile_addr = base + soc->dir_conn_addr[i];
+		for (j = 0; j < 8; j++)
+			writel_relaxed(pctrl->msm_tile_regs[i].dir_con_regs[j],
+							tile_addr + j*4);
+	}
+	/* Restore spi_cfg_regs */
+	if (pctrl->spi_cfg_regs && pctrl->spi_cfg_regs_val) {
+		spi_cfg_regs_count = (pctrl->spi_cfg_end -
+				pctrl->spi_cfg_regs) / 4 + 2;
+		spi_cfg_reg = pctrl->spi_cfg_regs;
+		for (j = 0; j < spi_cfg_regs_count; j++)
+			WARN_ON(scm_io_write(spi_cfg_reg + j * 4,
+				pctrl->spi_cfg_regs_val[j]));
+	}
+
+	/* Restore normal gpios */
+	for (i = 0; i < soc->ngpios; i++) {
+		pgroup = &soc->groups[i];
+		base = reassign_pctrl_reg(soc, i);
+		writel_relaxed(pctrl->gpio_regs[i].ctl_reg,
+					base + pgroup->ctl_reg);
+		writel_relaxed(pctrl->gpio_regs[i].io_reg,
+					base + pgroup->io_reg);
+		writel_relaxed(pctrl->gpio_regs[i].intr_cfg_reg,
+					base + pgroup->intr_cfg_reg);
+		writel_relaxed(pctrl->gpio_regs[i].intr_status_reg,
+					base + pgroup->intr_status_reg);
+	}
+
+	/* Restore other special gpios. Variable i in fallthrough */
+	for ( ; i < soc->ngroups; i++) {
+		pgroup = &soc->groups[i];
+		base = reassign_pctrl_reg(soc, i);
+		if (pgroup->ctl_reg)
+			writel_relaxed(pctrl->gpio_regs[i].ctl_reg,
+						base + pgroup->ctl_reg);
+		if (pgroup->io_reg)
+			writel_relaxed(pctrl->gpio_regs[i].io_reg,
+						base + pgroup->io_reg);
+	}
+}
+#endif
+
+static int msm_pinctrl_suspend(void)
+{
+#ifdef CONFIG_HIBERNATION
+	if (unlikely(hibernation))
+		msm_pinctrl_hibernation_suspend();
+#endif
+	return 0;
+}
+
+static void msm_pinctrl_resume(void)
+{
+	int i, irq;
+	u32 val;
+	unsigned long flags;
+	struct irq_desc *desc;
+	const struct msm_pingroup *g;
+	const char *name = "null";
+	struct msm_pinctrl *pctrl = msm_pinctrl_data;
+#ifdef CONFIG_HIBERNATION
+	if (unlikely(hibernation)) {
+		msm_pinctrl_hibernation_resume();
+		return;
+	}
+#endif
+
+	if (!msm_show_resume_irq_mask)
+		return;
+
+	raw_spin_lock_irqsave(&pctrl->lock, flags);
+	for_each_set_bit(i, pctrl->enabled_irqs, pctrl->chip.ngpio) {
+		g = &pctrl->soc->groups[i];
+		val = readl_relaxed(pctrl->regs + g->intr_status_reg);
+		if (val & BIT(g->intr_status_bit)) {
+			irq = irq_find_mapping(pctrl->chip.irqdomain, i);
+			log_irq_wakeup_reason(irq);
+			desc = irq_to_desc(irq);
+			if (desc == NULL)
+				name = "stray irq";
+			else if (desc->action && desc->action->name)
+				name = desc->action->name;
+
+			pr_warn("%s: %d triggered %s\n", __func__, irq, name);
+		}
+	}
+	raw_spin_unlock_irqrestore(&pctrl->lock, flags);
+}
+#else
+#define msm_pinctrl_suspend NULL
+#define msm_pinctrl_resume NULL
+#endif
+
+static struct syscore_ops msm_pinctrl_pm_ops = {
+	.suspend = msm_pinctrl_suspend,
+	.resume = msm_pinctrl_resume,
+};
 
 int msm_pinctrl_probe(struct platform_device *pdev,
 		      const struct msm_pinctrl_soc_data *soc_data)

@@ -2,6 +2,7 @@
  * kernel/power/suspend.c - Suspend to RAM and standby functionality.
  *
  * Copyright (c) 2003 Patrick Mochel
+ * Copyright (C) 2021 XiaoMi, Inc.
  * Copyright (c) 2003 Open Source Development Lab
  * Copyright (c) 2009 Rafael J. Wysocki <rjw@sisk.pl>, Novell Inc.
  *
@@ -387,6 +388,11 @@ void __weak arch_suspend_enable_irqs(void)
  *
  * This function should be called after devices have been suspended.
  */
+#ifdef CONFIG_DEBUG_FS
+extern void system_sleep_status_print_enabled(void);
+extern void rpmh_status_print_enabled(void);
+#endif
+extern void regulator_debug_print_enabled(bool only_enabled);
 static int suspend_enter(suspend_state_t state, bool *wakeup)
 {
 	int error;
@@ -424,7 +430,12 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 	error = disable_nonboot_cpus();
 	if (error || suspend_test(TEST_CPUS))
 		goto Enable_cpus;
-
+	}
+	regulator_debug_print_enabled(true);
+#ifdef CONFIG_DEBUG_FS
+	rpmh_status_print_enabled();
+	system_sleep_status_print_enabled();
+#endif
 	arch_suspend_disable_irqs();
 	BUG_ON(!irqs_disabled());
 

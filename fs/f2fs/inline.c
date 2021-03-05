@@ -1,6 +1,7 @@
 /*
  * fs/f2fs/inline.c
  * Copyright (c) 2013, Intel Corporation
+ * Copyright (C) 2021 XiaoMi, Inc.
  * Authors: Huajun Li <huajun.li@intel.com>
  *          Haicheng Li <haicheng.li@intel.com>
  * This program is free software; you can redistribute it and/or modify
@@ -521,6 +522,46 @@ static int f2fs_convert_inline_dir(struct inode *dir, struct page *ipage,
 		return f2fs_move_inline_dirents(dir, ipage, inline_dentry);
 	else
 		return f2fs_move_rehashed_dirents(dir, ipage, inline_dentry);
+}
+
+int f2fs_try_convert_inline_dir(struct inode *dir, struct dentry *dentry)
+{
+	struct f2fs_sb_info *sbi = F2FS_I_SB(dir);
+	struct page *ipage;
+	struct fscrypt_name fname;
+	void *inline_dentry = NULL;
+	int err = 0;
+
+	if (!f2fs_has_inline_dentry(dir))
+		return 0;
+
+	f2fs_lock_op(sbi);
+
+	err = fscrypt_setup_filename(dir, &dentry->d_name, 0, &fname);
+	if (err)
+		goto out;
+
+	ipage = f2fs_get_node_page(sbi, dir->i_ino);
+	if (IS_ERR(ipage)) {
+		err = PTR_ERR(ipage);
+		goto out_fname;
+	}
+
+	if (f2fs_has_enough_room(dir, ipage, &fname)) {
+		f2fs_put_page(ipage, 1);
+		goto out_fname;
+	}
+
+	inline_dentry = inline_data_addr(dir, ipage);
+
+	err = do_convert_inline_dir(dir, ipage, inline_dentry);
+	if (!err)
+		f2fs_put_page(ipage, 1);
+out_fname:
+	fscrypt_free_filename(&fname);
+out:
+	f2fs_unlock_op(sbi);
+	return err;
 }
 
 int f2fs_add_inline_entry(struct inode *dir, const struct qstr *new_name,

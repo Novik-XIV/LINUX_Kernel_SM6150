@@ -34,6 +34,7 @@
 
 #include <trace/events/thermal.h>
 
+#define USE_LMH_DEV    0
 /*
  * Cooling state <-> CPUFreq frequency
  *
@@ -152,7 +153,7 @@ static int cpufreq_thermal_notifier(struct notifier_block *nb,
 	unsigned long clipped_freq;
 	struct cpufreq_cooling_device *cpufreq_cdev;
 
-	if (event != CPUFREQ_ADJUST)
+	if (event != CPUFREQ_THERMAL)
 		return NOTIFY_DONE;
 
 	mutex_lock(&cooling_list_lock);
@@ -181,9 +182,50 @@ static int cpufreq_thermal_notifier(struct notifier_block *nb,
 			cpufreq_verify_within_limits(policy, 0, clipped_freq);
 		break;
 	}
+	/*
+	 * policy->max is the maximum allowed frequency defined by user
+	 * and clipped_freq is the maximum that thermal constraints
+	 * allow.
+	 *
+	 * If clipped_freq is lower than policy->max, then we need to
+	 * readjust policy->max.
+	 *
+	 * But, if clipped_freq is greater than policy->max, we don't
+	 * need to do anything.
+	 *
+	 * Similarly, if policy minimum set by the user is less than
+	 * the floor_frequency, then adjust the policy->min.
+	 */
+	cpufreq_verify_within_limits(policy, floor_freq, clipped_freq);
 	mutex_unlock(&cooling_list_lock);
 
 	return NOTIFY_OK;
+}
+
+void cpu_limits_set_level(unsigned int cpu, unsigned int max_freq)
+{
+	struct cpufreq_cooling_device *cpufreq_cdev;
+	struct thermal_cooling_device *cdev;
+	unsigned int cdev_cpu;
+	unsigned int level;
+
+	list_for_each_entry(cpufreq_cdev, &cpufreq_cdev_list, node) {
+		sscanf(cpufreq_cdev->cdev->type, "thermal-cpufreq-%d", &cdev_cpu);
+		if (cdev_cpu == cpu) {
+			for (level = 0; level < cpufreq_cdev->max_level; level++) {
+				int target_freq = cpufreq_cdev->freq_table[level].frequency;
+				if (max_freq >= target_freq) {
+					cdev = cpufreq_cdev->cdev;
+					if (cdev)
+						cdev->ops->set_cur_state(cdev, level);
+
+					break;
+				}
+			}
+
+			break;
+		}
+	}
 }
 
 /**
@@ -448,7 +490,7 @@ static int cpufreq_set_cur_state(struct thermal_cooling_device *cdev,
 
 	/* Request state should be less than max_level */
 	if (WARN_ON(state > cpufreq_cdev->max_level))
-		return -EINVAL;
+		state = cpufreq_cdev->max_level;
 
 	/* Check if the old cooling action is same as new cooling action */
 	if (cpufreq_cdev->cpufreq_state == state)
@@ -458,7 +500,22 @@ static int cpufreq_set_cur_state(struct thermal_cooling_device *cdev,
 	cpufreq_cdev->cpufreq_state = state;
 	cpufreq_cdev->clipped_freq = clip_freq;
 
-	cpufreq_update_policy(cpufreq_cdev->policy->cpu);
+	/* Check if the device has a platform mitigation function that
+	 * can handle the CPU freq mitigation, if not, notify cpufreq
+	 * framework.
+	 */
+	if (USE_LMH_DEV && cpufreq_cdev->plat_ops) {
+		if (cpufreq_cdev->plat_ops->ceil_limit)
+			cpufreq_cdev->plat_ops->ceil_limit(cpu,
+						clip_freq);
+		get_online_cpus();
+		cpufreq_update_policy(cpu);
+		put_online_cpus();
+	} else {
+		get_online_cpus();
+		cpufreq_update_policy(cpu);
+		put_online_cpus();
+	}
 
 	return 0;
 }
@@ -930,9 +987,12 @@ void cpufreq_cooling_unregister(struct thermal_cooling_device *cdev)
 	last = list_empty(&cpufreq_cdev_list);
 	mutex_unlock(&cooling_list_lock);
 
-	if (last)
-		cpufreq_unregister_notifier(&thermal_cpufreq_notifier_block,
-					    CPUFREQ_POLICY_NOTIFIER);
+	if (last) {
+		unregister_pm_notifier(&cpufreq_cooling_pm_nb);
+		cpufreq_unregister_notifier(
+				&thermal_cpufreq_notifier_block,
+				CPUFREQ_POLICY_NOTIFIER);
+	}
 
 	thermal_cooling_device_unregister(cpufreq_cdev->cdev);
 	ida_simple_remove(&cpufreq_ida, cpufreq_cdev->id);

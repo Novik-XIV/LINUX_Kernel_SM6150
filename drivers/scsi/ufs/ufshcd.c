@@ -3,7 +3,8 @@
  *
  * This code is based on drivers/scsi/ufs/ufshcd.c
  * Copyright (C) 2011-2013 Samsung India Software Operations
- * Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2021 XiaoMi, Inc.
+ * Copyright (c) 2013-2020, The Linux Foundation. All rights reserved.
  *
  * Authors:
  *	Santosh Yaraganavi <santosh.sy@samsung.com>
@@ -64,10 +65,10 @@
 /* Query request retries */
 #define QUERY_REQ_RETRIES 3
 /* Query request timeout */
-#define QUERY_REQ_TIMEOUT 1500 /* 1.5 seconds */
+#define QUERY_REQ_TIMEOUT 3000 /* 3.0 seconds */
 
 /* Task management command timeout */
-#define TM_CMD_TIMEOUT	100 /* msecs */
+#define TM_CMD_TIMEOUT	500 /* msecs */
 
 /* maximum number of retries for a general UIC command  */
 #define UFS_UIC_COMMAND_RETRIES 3
@@ -209,6 +210,24 @@ static struct ufs_dev_fix ufs_fixups[] = {
 	UFS_FIX(UFS_VENDOR_SKHYNIX, UFS_ANY_MODEL, UFS_DEVICE_NO_VCCQ),
 	UFS_FIX(UFS_VENDOR_SKHYNIX, UFS_ANY_MODEL,
 		UFS_DEVICE_QUIRK_HOST_PA_SAVECONFIGTIME),
+	UFS_FIX(UFS_VENDOR_SKHYNIX, UFS_ANY_MODEL,
+		UFS_DEVICE_QUIRK_WAIT_AFTER_REF_CLK_UNGATE),
+	UFS_FIX(UFS_VENDOR_MICRON, UFS_ANY_MODEL,
+		UFS_DEVICE_QUIRK_WAIT_AFTER_REF_CLK_UNGATE),
+	UFS_FIX(UFS_VENDOR_SKHYNIX, "hB8aL1",
+		UFS_DEVICE_QUIRK_HS_G1_TO_HS_G3_SWITCH),
+	UFS_FIX(UFS_VENDOR_SKHYNIX, "hC8aL1",
+		UFS_DEVICE_QUIRK_HS_G1_TO_HS_G3_SWITCH),
+	UFS_FIX(UFS_VENDOR_SKHYNIX, "hD8aL1",
+		UFS_DEVICE_QUIRK_HS_G1_TO_HS_G3_SWITCH),
+	UFS_FIX(UFS_VENDOR_SKHYNIX, "hC8aM1",
+		UFS_DEVICE_QUIRK_HS_G1_TO_HS_G3_SWITCH),
+	UFS_FIX(UFS_VENDOR_SKHYNIX, "h08aM1",
+		UFS_DEVICE_QUIRK_HS_G1_TO_HS_G3_SWITCH),
+	UFS_FIX(UFS_VENDOR_SKHYNIX, "hC8GL1",
+		UFS_DEVICE_QUIRK_HS_G1_TO_HS_G3_SWITCH),
+	UFS_FIX(UFS_VENDOR_SKHYNIX, "hC8HL1",
+		UFS_DEVICE_QUIRK_HS_G1_TO_HS_G3_SWITCH),
 
 	END_FIX
 };
@@ -1073,7 +1092,7 @@ static int ufshcd_scale_gear(struct ufs_hba *hba, bool scale_up)
 
 static int ufshcd_clock_scaling_prepare(struct ufs_hba *hba)
 {
-	#define DOORBELL_CLR_TOUT_US		(1000 * 1000) /* 1 sec */
+	#define DOORBELL_CLR_TOUT_US		(40*1000*1000) /* 40 sec */
 	int ret = 0;
 	/*
 	 * make sure that there are no outstanding requests when
@@ -3946,6 +3965,8 @@ static int ufshcd_complete_dev_init(struct ufs_hba *hba)
 	int i;
 	int err;
 	bool flag_res = 1;
+	ktime_t timeout;
+	bool timeout_warn = false;
 
 	err = ufshcd_query_flag_retry(hba, UPIU_QUERY_OPCODE_SET_FLAG,
 		QUERY_FLAG_IDN_FDEVICEINIT, NULL);
@@ -3956,11 +3977,34 @@ static int ufshcd_complete_dev_init(struct ufs_hba *hba)
 		goto out;
 	}
 
-	/* poll for max. 1000 iterations for fDeviceInit flag to clear */
-	for (i = 0; i < 1000 && !err && flag_res; i++)
-		err = ufshcd_query_flag_retry(hba, UPIU_QUERY_OPCODE_READ_FLAG,
-			QUERY_FLAG_IDN_FDEVICEINIT, &flag_res);
+	/*
+	 * Some vendor devices are taking longer time to complete its internal
+	 * initialization, so set fDeviceInit flag poll time to 5 secs
+	 */
+	timeout = ktime_add_ms(ktime_get(), 8000);
 
+	/* poll for max. 5sec for fDeviceInit flag to clear */
+	while (1) {
+		timeout_warn = ktime_after(ktime_get(), timeout);
+		err = ufshcd_query_flag_retry(hba, UPIU_QUERY_OPCODE_READ_FLAG,
+					QUERY_FLAG_IDN_FDEVICEINIT, &flag_res);
+		if (err || !flag_res || timeout_warn)
+			break;
+
+		/*
+		 * Poll for this flag in a tight loop for first 1000 iterations.
+		 * This is same as old logic which is working for most of the
+		 * devices, so continue using the same.
+		 */
+		if (i == 1000)
+			msleep(20);
+		else
+			i++;
+	}
+	if (timeout_warn)
+		dev_err(hba->dev,
+			"%s reading fDeviceInit flag timeout.\n",
+			__func__);
 	if (err)
 		dev_err(hba->dev,
 			"%s reading fDeviceInit flag failed with error %d\n",
@@ -4403,6 +4447,7 @@ static int ufshcd_change_queue_depth(struct scsi_device *sdev, int depth)
 	return scsi_change_queue_depth(sdev, depth);
 }
 
+extern void set_ufs_hba_data(struct scsi_device *sdev);
 /**
  * ufshcd_slave_configure - adjust SCSI device configurations
  * @sdev: pointer to SCSI device
@@ -6347,6 +6392,148 @@ static void ufshcd_def_desc_sizes(struct ufs_hba *hba)
 	hba->desc_size.geom_desc = QUERY_DESC_GEOMETRY_DEF_SIZE;
 }
 
+static void ufshcd_apply_pm_quirks(struct ufs_hba *hba)
+{
+	if (hba->dev_info.quirks & UFS_DEVICE_QUIRK_NO_LINK_OFF) {
+		if (ufs_get_pm_lvl_to_link_pwr_state(hba->rpm_lvl) ==
+		    UIC_LINK_OFF_STATE) {
+			hba->rpm_lvl =
+				ufs_get_desired_pm_lvl_for_dev_link_state(
+						UFS_SLEEP_PWR_MODE,
+						UIC_LINK_HIBERN8_STATE);
+			dev_info(hba->dev, "UFS_DEVICE_QUIRK_NO_LINK_OFF enabled, changed rpm_lvl to %d\n",
+				hba->rpm_lvl);
+		}
+		if (ufs_get_pm_lvl_to_link_pwr_state(hba->spm_lvl) ==
+		    UIC_LINK_OFF_STATE) {
+			hba->spm_lvl =
+				ufs_get_desired_pm_lvl_for_dev_link_state(
+						UFS_SLEEP_PWR_MODE,
+						UIC_LINK_HIBERN8_STATE);
+			dev_info(hba->dev, "UFS_DEVICE_QUIRK_NO_LINK_OFF enabled, changed spm_lvl to %d\n",
+				hba->spm_lvl);
+		}
+	}
+}
+
+/**
+ * ufshcd_set_dev_ref_clk - set the device bRefClkFreq
+ * @hba: per-adapter instance
+ *
+ * Read the current value of the bRefClkFreq attribute from device and update it
+ * if host is supplying different reference clock frequency than one mentioned
+ * in bRefClkFreq attribute.
+ *
+ * Returns zero on success, non-zero error value on failure.
+ */
+static int ufshcd_set_dev_ref_clk(struct ufs_hba *hba)
+{
+	int err = 0;
+	int ref_clk = -1;
+	static const char * const ref_clk_freqs[] = {"19.2 MHz", "26 MHz",
+						     "38.4 MHz", "52 MHz"};
+
+	err = ufshcd_query_attr_retry(hba, UPIU_QUERY_OPCODE_READ_ATTR,
+			QUERY_ATTR_IDN_REF_CLK_FREQ, 0, 0, &ref_clk);
+
+	if (err) {
+		dev_err(hba->dev, "%s: failed reading bRefClkFreq. err = %d\n",
+			 __func__, err);
+		goto out;
+	}
+
+	if ((ref_clk < 0) || (ref_clk > REF_CLK_FREQ_52_MHZ)) {
+		dev_err(hba->dev, "%s: invalid ref_clk setting = %d\n",
+			 __func__, ref_clk);
+		err = -EINVAL;
+		goto out;
+	}
+
+	if (ref_clk == hba->dev_ref_clk_freq)
+		goto out; /* nothing to update */
+
+	err = ufshcd_query_attr_retry(hba, UPIU_QUERY_OPCODE_WRITE_ATTR,
+			QUERY_ATTR_IDN_REF_CLK_FREQ, 0, 0,
+			&hba->dev_ref_clk_freq);
+
+	if (err)
+		dev_err(hba->dev, "%s: bRefClkFreq setting to %s failed\n",
+			__func__, ref_clk_freqs[hba->dev_ref_clk_freq]);
+	else
+		/*
+		 * It is good to print this out here to debug any later failures
+		 * related to gear switch.
+		 */
+		dev_info(hba->dev, "%s: bRefClkFreq setting to %s succeeded\n",
+			__func__, ref_clk_freqs[hba->dev_ref_clk_freq]);
+
+out:
+	return err;
+}
+
+static int ufshcd_get_dev_ref_clk_gating_wait(struct ufs_hba *hba,
+					struct ufs_dev_desc *dev_desc)
+{
+	int err = 0;
+	u32 gating_wait = UFSHCD_REF_CLK_GATING_WAIT_US;
+
+	if (dev_desc->wspecversion >= 0x300) {
+		err = ufshcd_query_attr_retry(hba, UPIU_QUERY_OPCODE_READ_ATTR,
+				QUERY_ATTR_IDN_REF_CLK_GATING_WAIT_TIME, 0, 0,
+				&gating_wait);
+
+		if (err)
+			dev_err(hba->dev, "failed reading bRefClkGatingWait. err = %d, use default %uus\n",
+					err, gating_wait);
+
+		if (gating_wait == 0) {
+			gating_wait = UFSHCD_REF_CLK_GATING_WAIT_US;
+			dev_err(hba->dev, "undefined ref clk gating wait time, use default %uus\n",
+					gating_wait);
+		}
+	}
+
+	hba->dev_ref_clk_gating_wait = gating_wait;
+	return err;
+}
+
+static int ufs_read_device_desc_data(struct ufs_hba *hba)
+{
+	int err = 0;
+	u8 *desc_buf = NULL;
+
+	if (hba->desc_size.dev_desc) {
+		desc_buf = kmalloc(hba->desc_size.dev_desc, GFP_KERNEL);
+		if (!desc_buf) {
+			err = -ENOMEM;
+			dev_err(hba->dev,
+				"%s: Failed to allocate desc_buf\n", __func__);
+			return err;
+		}
+	}
+	err = ufshcd_read_device_desc(hba, desc_buf, hba->desc_size.dev_desc);
+	if (err)
+		goto out;
+
+	/*
+	 * getting vendor (manufacturerID) and Bank Index in big endian
+	 * format
+	 */
+	hba->dev_info.w_manufacturer_id =
+		desc_buf[DEVICE_DESC_PARAM_MANF_ID] << 8 |
+		desc_buf[DEVICE_DESC_PARAM_MANF_ID + 1];
+	hba->dev_info.b_device_sub_class =
+		desc_buf[DEVICE_DESC_PARAM_DEVICE_SUB_CLASS];
+	hba->dev_info.i_product_name = desc_buf[DEVICE_DESC_PARAM_PRDCT_NAME];
+	hba->dev_info.w_spec_version =
+		desc_buf[DEVICE_DESC_PARAM_SPEC_VER] << 8 |
+		desc_buf[DEVICE_DESC_PARAM_SPEC_VER + 1];
+
+out:
+	kfree(desc_buf);
+	return err;
+}
+
 /**
  * ufshcd_probe_hba - probe hba to detect device and initialize
  * @hba: per-adapter instance
@@ -7898,6 +8085,7 @@ EXPORT_SYMBOL(ufshcd_alloc_host);
  * @irq: Interrupt line of device
  * Returns 0 on success, non-zero value on failure
  */
+
 int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 {
 	int err;

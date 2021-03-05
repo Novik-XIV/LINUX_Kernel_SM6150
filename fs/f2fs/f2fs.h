@@ -2,6 +2,7 @@
  * fs/f2fs/f2fs.h
  *
  * Copyright (c) 2012 Samsung Electronics Co., Ltd.
+ * Copyright (C) 2021 XiaoMi, Inc.
  *             http://www.samsung.com/
  *
  * This program is free software; you can redistribute it and/or modify
@@ -2527,27 +2528,36 @@ f2fs_hash_t f2fs_dentry_hash(const struct qstr *name_info,
 struct dnode_of_data;
 struct node_info;
 
-int check_nid_range(struct f2fs_sb_info *sbi, nid_t nid);
-bool available_free_memory(struct f2fs_sb_info *sbi, int type);
-int need_dentry_mark(struct f2fs_sb_info *sbi, nid_t nid);
-bool is_checkpointed_node(struct f2fs_sb_info *sbi, nid_t nid);
-bool need_inode_block_update(struct f2fs_sb_info *sbi, nid_t ino);
-void get_node_info(struct f2fs_sb_info *sbi, nid_t nid, struct node_info *ni);
-pgoff_t get_next_page_offset(struct dnode_of_data *dn, pgoff_t pgofs);
-int get_dnode_of_data(struct dnode_of_data *dn, pgoff_t index, int mode);
-int truncate_inode_blocks(struct inode *inode, pgoff_t from);
-int truncate_xattr_node(struct inode *inode, struct page *page);
-int wait_on_node_pages_writeback(struct f2fs_sb_info *sbi, nid_t ino);
-int remove_inode_page(struct inode *inode);
-struct page *new_inode_page(struct inode *inode);
-struct page *new_node_page(struct dnode_of_data *dn, unsigned int ofs);
-void ra_node_page(struct f2fs_sb_info *sbi, nid_t nid);
-struct page *get_node_page(struct f2fs_sb_info *sbi, pgoff_t nid);
-struct page *get_node_page_ra(struct page *parent, int start);
-void move_node_page(struct page *node_page, int gc_type);
-int fsync_node_pages(struct f2fs_sb_info *sbi, struct inode *inode,
-			struct writeback_control *wbc, bool atomic);
-int sync_node_pages(struct f2fs_sb_info *sbi, struct writeback_control *wbc,
+int f2fs_check_nid_range(struct f2fs_sb_info *sbi, nid_t nid);
+bool f2fs_available_free_memory(struct f2fs_sb_info *sbi, int type);
+bool f2fs_in_warm_node_list(struct f2fs_sb_info *sbi, struct page *page);
+void f2fs_init_fsync_node_info(struct f2fs_sb_info *sbi);
+void f2fs_del_fsync_node_entry(struct f2fs_sb_info *sbi, struct page *page);
+void f2fs_reset_fsync_node_info(struct f2fs_sb_info *sbi);
+int f2fs_need_dentry_mark(struct f2fs_sb_info *sbi, nid_t nid);
+bool f2fs_is_checkpointed_node(struct f2fs_sb_info *sbi, nid_t nid);
+bool f2fs_need_inode_block_update(struct f2fs_sb_info *sbi, nid_t ino);
+int f2fs_get_node_info(struct f2fs_sb_info *sbi, nid_t nid,
+						struct node_info *ni);
+pgoff_t f2fs_get_next_page_offset(struct dnode_of_data *dn, pgoff_t pgofs);
+int f2fs_get_dnode_of_data(struct dnode_of_data *dn, pgoff_t index, int mode);
+int f2fs_truncate_inode_blocks(struct inode *inode, pgoff_t from);
+int f2fs_truncate_xattr_node(struct inode *inode);
+int f2fs_wait_on_node_pages_writeback(struct f2fs_sb_info *sbi,
+					unsigned int seq_id);
+int f2fs_remove_inode_page(struct inode *inode);
+struct page *f2fs_new_inode_page(struct inode *inode);
+struct page *f2fs_new_node_page(struct dnode_of_data *dn, unsigned int ofs);
+void f2fs_ra_node_page(struct f2fs_sb_info *sbi, nid_t nid);
+struct page *f2fs_get_node_page(struct f2fs_sb_info *sbi, pgoff_t nid);
+struct page *f2fs_get_node_page_ra(struct page *parent, int start);
+int f2fs_move_node_page(struct page *node_page, int gc_type);
+int f2fs_flush_inline_data(struct f2fs_sb_info *sbi);
+int f2fs_fsync_node_pages(struct f2fs_sb_info *sbi, struct inode *inode,
+			struct writeback_control *wbc, bool atomic,
+			unsigned int *seq_id);
+int f2fs_sync_node_pages(struct f2fs_sb_info *sbi,
+			struct writeback_control *wbc,
 			bool do_balance, enum iostat_type io_type);
 void build_free_nids(struct f2fs_sb_info *sbi, bool sync, bool mount);
 bool alloc_nid(struct f2fs_sb_info *sbi, nid_t *nid);

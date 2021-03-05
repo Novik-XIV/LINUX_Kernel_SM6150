@@ -2,6 +2,7 @@
  * soc-pcm.c  --  ALSA SoC PCM
  *
  * Copyright 2005 Wolfson Microelectronics PLC.
+ * Copyright (C) 2021 XiaoMi, Inc.
  * Copyright 2005 Openedhand Ltd.
  * Copyright (C) 2010 Slimlogic Ltd.
  * Copyright (C) 2010 Texas Instruments Inc.
@@ -33,6 +34,32 @@
 #include <sound/initval.h>
 
 #define DPCM_MAX_BE_USERS	8
+
+/*
+ * ASoC no host IO hardware.
+ * TODO: fine tune these values for all host less transfers.
+ */
+static const struct snd_pcm_hardware no_host_hardware = {
+	.info			= SNDRV_PCM_INFO_MMAP |
+				  SNDRV_PCM_INFO_MMAP_VALID |
+				  SNDRV_PCM_INFO_INTERLEAVED |
+				  SNDRV_PCM_INFO_PAUSE |
+				  SNDRV_PCM_INFO_RESUME,
+	.formats		= SNDRV_PCM_FMTBIT_S16_LE |
+				  SNDRV_PCM_FMTBIT_S24_LE |
+				  SNDRV_PCM_FMTBIT_S24_3LE |
+				  SNDRV_PCM_FMTBIT_S32_LE,
+	.period_bytes_min	= PAGE_SIZE >> 2,
+	.period_bytes_max	= PAGE_SIZE >> 1,
+	.periods_min		= 2,
+	.periods_max		= 4,
+	/*
+	 * Increase the max buffer bytes as PAGE_SIZE bytes is
+	 * not enough to encompass all the scenarios sent by
+	 * userspapce.
+	 */
+	.buffer_bytes_max	= PAGE_SIZE * 4,
+};
 
 /*
  * snd_soc_dai_stream_valid() - check if a DAI supports the given stream

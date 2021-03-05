@@ -87,3 +87,25 @@ config QCOM_WCNSS_CTRL
 	  firmware to a newly booted WCNSS chip.
 
 endmenu
+
+config QCOM_HYP_CORE_CTL
+	bool "CPU reservation scheme for Hypervisor"
+	depends on OKL4_GUEST
+	help
+	  This driver reserve the specified CPUS by isolating them. The reserved
+	  CPUs can be assigned to the other guest OS by the hypervisor.
+	  An offline CPU is considered as a reserved CPU since this OS can't use
+	  it.
+config DEBUG_POLICY_STATUS
+	bool "read debug policy status and update command line"
+	help
+	  This driver read debug policy status using Qualcomm scm_call2 interface
+	  and then update cmdline
+
+config RENAME_BLOCK_DEVICE
+	bool "Rename block device node in /dev"
+	help
+	  This driver is used to rename the block device node assigned by generic driver
+	  to a name that is needed.
+
+source "drivers/soc/qcom/wcnss/Kconfig"

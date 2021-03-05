@@ -450,6 +450,109 @@ struct sched_entity {
 #endif
 };
 
+struct sched_load {
+	unsigned long prev_load;
+	unsigned long new_task_load;
+	unsigned long predicted_load;
+};
+
+struct cpu_cycle_counter_cb {
+	u64 (*get_cpu_cycle_counter)(int cpu);
+};
+
+#define MAX_NUM_CGROUP_COLOC_ID	20
+
+extern DEFINE_PER_CPU_READ_MOSTLY(int, sched_load_boost);
+
+#ifdef CONFIG_SCHED_WALT
+extern void sched_exit(struct task_struct *p);
+extern int register_cpu_cycle_counter_cb(struct cpu_cycle_counter_cb *cb);
+extern void sched_set_io_is_busy(int val);
+extern int sched_set_group_id(struct task_struct *p, unsigned int group_id);
+extern unsigned int sched_get_group_id(struct task_struct *p);
+extern int sched_set_init_task_load(struct task_struct *p, int init_load_pct);
+extern u32 sched_get_init_task_load(struct task_struct *p);
+extern void sched_update_cpu_freq_min_max(const cpumask_t *cpus, u32 fmin,
+					  u32 fmax);
+extern int sched_set_boost(int enable);
+extern void free_task_load_ptrs(struct task_struct *p);
+
+extern bool sched_prefer_idle_on_input;
+static inline void sched_set_prefer_idle(bool enable)
+{
+	sched_prefer_idle_on_input = enable;
+}
+
+#define RAVG_HIST_SIZE_MAX  5
+#define NUM_BUSY_BUCKETS 10
+
+/* ravg represents frequency scaled cpu-demand of tasks */
+struct ravg {
+	/*
+	 * 'mark_start' marks the beginning of an event (task waking up, task
+	 * starting to execute, task being preempted) within a window
+	 *
+	 * 'sum' represents how runnable a task has been within current
+	 * window. It incorporates both running time and wait time and is
+	 * frequency scaled.
+	 *
+	 * 'sum_history' keeps track of history of 'sum' seen over previous
+	 * RAVG_HIST_SIZE windows. Windows where task was entirely sleeping are
+	 * ignored.
+	 *
+	 * 'demand' represents maximum sum seen over previous
+	 * sysctl_sched_ravg_hist_size windows. 'demand' could drive frequency
+	 * demand for tasks.
+	 *
+	 * 'curr_window_cpu' represents task's contribution to cpu busy time on
+	 * various CPUs in the current window
+	 *
+	 * 'prev_window_cpu' represents task's contribution to cpu busy time on
+	 * various CPUs in the previous window
+	 *
+	 * 'curr_window' represents the sum of all entries in curr_window_cpu
+	 *
+	 * 'prev_window' represents the sum of all entries in prev_window_cpu
+	 *
+	 * 'pred_demand' represents task's current predicted cpu busy time
+	 *
+	 * 'busy_buckets' groups historical busy time into different buckets
+	 * used for prediction
+	 *
+	 * 'demand_scaled' represents task's demand scaled to 1024
+	 */
+	u64 mark_start;
+	u32 sum, demand;
+	u32 coloc_demand;
+	u32 sum_history[RAVG_HIST_SIZE_MAX];
+	u32 *curr_window_cpu, *prev_window_cpu;
+	u32 curr_window, prev_window;
+	u16 active_windows;
+	u32 pred_demand;
+	u8 busy_buckets[NUM_BUSY_BUCKETS];
+	u16 demand_scaled;
+	u16 pred_demand_scaled;
+};
+#else
+static inline void sched_exit(struct task_struct *p) { }
+static inline int
+register_cpu_cycle_counter_cb(struct cpu_cycle_counter_cb *cb)
+{
+	return 0;
+}
+static inline void sched_set_io_is_busy(int val) {};
+
+static inline int sched_set_boost(int enable)
+{
+	return -EINVAL;
+}
+static inline void sched_set_prefer_idle(bool enable) {};
+static inline void free_task_load_ptrs(struct task_struct *p) { }
+
+static inline void sched_update_cpu_freq_min_max(const cpumask_t *cpus,
+					u32 fmin, u32 fmax) { }
+#endif /* CONFIG_SCHED_WALT */
+
 struct sched_rt_entity {
 	struct list_head		run_list;
 	unsigned long			timeout;
@@ -1055,6 +1158,8 @@ struct task_struct {
 	 */
 	u64				timer_slack_ns;
 	u64				default_timer_slack_ns;
+	unsigned int top_app;
+	unsigned int woken_by_top_app;
 
 #ifdef CONFIG_KASAN
 	unsigned int			kasan_depth;

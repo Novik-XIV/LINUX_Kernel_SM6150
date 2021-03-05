@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2013 Red Hat
+ * Copyright (C) 2021 XiaoMi, Inc.
  * Author: Rob Clark <robdclark@gmail.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -265,6 +266,24 @@ struct drm_msm_gem_madvise {
 #define DRM_MSM_GEM_SUBMIT             0x06
 #define DRM_MSM_WAIT_FENCE             0x07
 #define DRM_MSM_GEM_MADVISE            0x08
+
+#define DRM_SDE_WB_CONFIG              0x40
+#define DRM_MSM_REGISTER_EVENT         0x41
+#define DRM_MSM_DEREGISTER_EVENT       0x42
+#define DRM_MSM_RMFB2                  0x43
+#define DRM_MSM_POWER_CTRL             0x44
+
+/* sde custom events */
+#define DRM_EVENT_HISTOGRAM 0x80000000
+#define DRM_EVENT_AD_BACKLIGHT 0x80000001
+#define DRM_EVENT_CRTC_POWER 0x80000002
+#define DRM_EVENT_SYS_BACKLIGHT 0x80000003
+#define DRM_EVENT_SDE_POWER 0x80000004
+#define DRM_EVENT_IDLE_NOTIFY 0x80000005
+#define DRM_EVENT_PANEL_DEAD 0x80000006 /* ESD event */
+#define DRM_EVENT_SDE_HW_RECOVERY 0X80000007
+
+#define DRM_EVENT_TOUCH 0x8000000F
 
 #define DRM_IOCTL_MSM_GET_PARAM        DRM_IOWR(DRM_COMMAND_BASE + DRM_MSM_GET_PARAM, struct drm_msm_param)
 #define DRM_IOCTL_MSM_GEM_NEW          DRM_IOWR(DRM_COMMAND_BASE + DRM_MSM_GEM_NEW, struct drm_msm_gem_new)

@@ -45,6 +45,12 @@ struct thermal_cooling_device *
 cpufreq_power_cooling_register(struct cpufreq_policy *policy,
 			       u32 capacitance, get_static_t plat_static_func);
 
+struct thermal_cooling_device *
+cpufreq_platform_cooling_register(const struct cpumask *clip_cpus,
+					struct cpu_cooling_ops *ops);
+
+void cpu_limits_set_level(unsigned int cpu, unsigned int max_freq);
+
 /**
  * of_cpufreq_cooling_register - create cpufreq cooling device based on DT.
  * @np: a valid struct device_node to the cooling device device tree node.

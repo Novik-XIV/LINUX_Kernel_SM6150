@@ -2,6 +2,7 @@
  * fs/fs-writeback.c
  *
  * Copyright (C) 2002, Linus Torvalds.
+ * Copyright (C) 2021 XiaoMi, Inc.
  *
  * Contains all the functions related to writing back and waiting
  * upon dirty inodes against superblocks, and writing back dirty
@@ -1407,13 +1408,6 @@ __writeback_single_inode(struct inode *inode, struct writeback_control *wbc)
 		mark_inode_dirty_sync(inode);
 	}
 
-	/*
-	 * Some filesystems may redirty the inode during the writeback
-	 * due to delalloc, clear dirty metadata flags right before
-	 * write_inode()
-	 */
-	spin_lock(&inode->i_lock);
-	dirty = inode->i_state & I_DIRTY;
 	inode->i_state &= ~dirty;
 
 	/*

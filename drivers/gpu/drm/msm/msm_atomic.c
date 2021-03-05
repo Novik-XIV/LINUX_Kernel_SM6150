@@ -1,4 +1,6 @@
 /*
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2021 XiaoMi, Inc.
  * Copyright (C) 2014 Red Hat
  * Author: Rob Clark <robdclark@gmail.com>
  *
@@ -19,6 +21,10 @@
 #include "msm_kms.h"
 #include "msm_gem.h"
 #include "msm_fence.h"
+#include "sde_trace.h"
+#include "xiaomi_frame_stat.h"
+
+#define MULTIPLE_CONN_DETECTED(x) (x > 1)
 
 struct msm_commit {
 	struct drm_device *dev;
